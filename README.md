@@ -44,13 +44,92 @@ strm/
 
 ## Setup
 
-### 1. Stop Plex
+Running Plex and the proxy in the same Docker Compose file is recommended. Both containers share a Docker network, so the proxy is reachable at `strm-proxy` without needing to expose an IP address.
+
+### 1. Create a `docker-compose.yml`
+
+```yaml
+services:
+  strm-proxy:
+    image: liveinaus/plex-strm-assistant
+    container_name: strm-proxy
+    environment:
+      - STRM_ROOT=/strm
+      - PORT=3000
+      - STRM_PROXY_HOST=strm-proxy
+      - "DB_PATH=/plex-config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+      - SKIP_SETUP=${SKIP_SETUP:-false}
+      - CONTAINER_PREFIX=/media/strm
+    volumes:
+      - ./strm:/strm:ro
+      - ./plex-config:/plex-config
+    ports:
+      - '3000:3000'
+    restart: unless-stopped
+
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    ports:
+      - '32400:32400'
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Australia/Sydney
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM:-}
+    volumes:
+      - ./plex-config:/config
+      - ./strm:/media/strm:ro
+    restart: unless-stopped
+```
+
+Place your `.strm` files under `./strm/` and Plex config will be persisted under `./plex-config/`.
+
+### 2. First run — let Plex initialise
+
+Start Plex on its own so it can create its database:
+
+```bash
+docker compose up plex
+```
+
+Wait until Plex is accessible at `http://localhost:32400/web` and complete the initial setup. Then stop it:
+
+```bash
+docker compose stop plex
+```
+
+### 3. Install triggers
 
 > **Important:** Plex must be stopped during trigger installation. Writing to the Plex database while Plex is running risks database corruption.
 
-### 2. Run the proxy container
+Start the proxy — it will install the SQLite triggers then start serving:
 
-**Docker run:**
+```bash
+docker compose up strm-proxy
+```
+
+Wait for:
+
+```text
+strm-proxy | Setup complete. Plex rescans and new .strm files are now handled automatically.
+strm-proxy | strm-proxy on :3000  root: /strm
+```
+
+### 4. Start everything
+
+```bash
+docker compose up -d
+```
+
+Add a library in Plex pointing at `/media/strm` and run a scan. Files will be playable immediately.
+
+---
+
+## Standalone usage (proxy only)
+
+If Plex is already running outside of Docker Compose, you can run the proxy on its own. Set `STRM_PROXY_HOST` to a hostname or IP reachable by both the Plex server and your Plex clients.
 
 ```bash
 docker run -d \
@@ -58,40 +137,9 @@ docker run -d \
   -p 3000:3000 \
   -v /path/to/your/strm:/strm:ro \
   -v /path/to/plex/config:/plex-config \
-  -e STRM_PROXY_HOST=<hostname-or-ip-reachable-by-plex-clients> \
+  -e STRM_PROXY_HOST=<hostname-or-ip> \
   liveinaus/plex-strm-assistant
 ```
-
-**Docker Compose:**
-
-```yaml
-services:
-  strm-proxy:
-    image: liveinaus/plex-strm-assistant
-    container_name: strm-proxy
-    ports:
-      - '3000:3000'
-    environment:
-      - STRM_PROXY_HOST=<hostname-or-ip-reachable-by-plex-clients>
-    volumes:
-      - /path/to/your/strm:/strm:ro
-      - /path/to/plex/config:/plex-config
-    restart: unless-stopped
-```
-
-- `/path/to/plex/config` — the root of your Plex config directory (the one that contains `Library/Application Support/...`)
-- `STRM_PROXY_HOST` — must be an address reachable by both the Plex server and Plex clients, typically the Docker host IP or a LAN hostname
-
-Wait for the log line:
-
-```text
-strm-proxy | Setup complete. Plex rescans and new .strm files are now handled automatically.
-strm-proxy | strm-proxy on :3000  root: /strm
-```
-
-### 3. Start Plex
-
-Start Plex again, add a library pointing at your `.strm` folder, and scan. Files will be playable immediately.
 
 ---
 
