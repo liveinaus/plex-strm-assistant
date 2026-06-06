@@ -1,5 +1,8 @@
 # plex-strm-assistant
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker Hub](https://img.shields.io/docker/pulls/liveinaus/plex-strm-assistant)](https://hub.docker.com/r/liveinaus/plex-strm-assistant)
+
 Enables `.strm` file playback in Plex. Plex dropped native `.strm` support, so this tool bridges the gap with two components:
 
 - **strm-proxy** — a lightweight HTTP server that reads a `.strm` file and returns a `302` redirect to the URL inside it.
@@ -144,3 +147,39 @@ mv "$DB" "${DB}.dead" && mv "${DB}.fresh" "$DB"
 rm -f "${DB}-wal" "${DB}-shm"
 # Start Plex again
 ```
+
+---
+
+## Roadmap
+
+- [x] HTTP proxy that resolves `.strm` files to stream URLs via `302` redirect
+- [x] SQLite triggers to survive Plex rescans automatically
+- [x] Inject H.264/AAC codec metadata to force direct play (no transcoding)
+- [x] Docker container — installs triggers on start, then runs proxy
+- [x] Multi-platform image (amd64, arm64)
+- [x] Safe first-run handling — waits for Plex DB, `SKIP_SETUP` flag for restarts
+- [ ] Disable unnecessary Plex processing on `.strm` items (analysis, thumbnail generation, etc.)
+- [ ] Follow 302 redirects from the source URL before returning to Plex — enables compatibility with services that require a redirect step (e.g. 115 Drive)
+
+---
+
+## Support
+
+If this project saves you some time, a GitHub star would be appreciated!
+[github.com/liveinaus/plex-strm-assistant](https://github.com/liveinaus/plex-strm-assistant)
+
+---
+
+## Disclaimer
+
+This project is an independent, community-built tool and is not affiliated with, endorsed by, or supported by Plex Inc. in any way.
+
+Using this tool involves writing directly to the Plex SQLite database and modifying internal data structures. This may conflict with Plex's Terms of Service or void any support entitlements. Use it at your own risk.
+
+The author accepts no responsibility for data loss, database corruption, account suspension, or any other consequence arising from the use of this software.
+
+---
+
+## Licence
+
+MIT — free to use and modify. You must retain the copyright notice and a link back to this repository in any copies or derivatives. See [LICENSE](LICENSE) for the full text.
