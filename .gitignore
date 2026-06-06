@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.js.map
+plex-config/
+.env
+.DS_Store
+npm-debug.log*

@@ -1,0 +1,36 @@
+services:
+  strm-proxy:
+    build: .
+    container_name: strm-proxy
+    environment:
+      - STRM_ROOT=/strm
+      - PORT=3000
+      - STRM_PROXY_HOST=strm-proxy
+      - "DB_PATH=/plex-config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+      - SKIP_SETUP=${SKIP_SETUP:-false}
+      - CONTAINER_PREFIX=/media/strm
+    volumes:
+      - ./strm:/strm:ro
+      - ./plex-config:/plex-config
+    ports:
+      - '3000:3000'
+    restart: unless-stopped
+
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex-strm-test
+    ports:
+      - '32400:32400'
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Australia/Sydney
+      - VERSION=docker
+      # Get a claim token from https://www.plex.tv/claim/ (valid for 4 minutes).
+      # Required only for the initial setup to link Plex to your account.
+      - PLEX_CLAIM=${PLEX_CLAIM:-}
+    volumes:
+      - ./plex-config:/config
+      # .strm files are still mounted so Plex can scan and discover them
+      - ./strm:/media/strm:ro
+    restart: unless-stopped

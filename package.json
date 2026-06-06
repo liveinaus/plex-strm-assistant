@@ -1,0 +1,24 @@
+{
+  "name": "plex-strm-helper",
+  "version": "0.8.1",
+  "description": "Replaces .strm file paths in the Plex database with the URLs they contain",
+  "main": "dist/index.js",
+  "bin": {
+    "plex-strm-helper": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --experimental-sqlite -r ts-node/register src/index.ts",
+    "start": "node --experimental-sqlite dist/index.js",
+    "format": "prettier --write src/**/*.ts"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "prettier": "^3.3.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.2"
+  }
+}
