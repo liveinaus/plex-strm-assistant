@@ -5,6 +5,8 @@
 
 Enables `.strm` file playback in Plex. Plex dropped native `.strm` support, so this tool bridges the gap with two components:
 
+![Plex Media Info showing proxy URL and H.264 direct play](docs/media-info.png)
+
 - **strm-proxy** — a lightweight HTTP server that reads a `.strm` file and returns a `302` redirect to the URL inside it.
 - **SQLite triggers** — installed once into the Plex database. Whenever Plex scans a `.strm` file, the trigger rewrites the stored path to a proxy URL (`http://strm-proxy:3000/...`). Rescans are handled automatically — no re-patching needed.
 
@@ -160,6 +162,16 @@ rm -f "${DB}-wal" "${DB}-shm"
 - [x] Safe first-run handling — waits for Plex DB, `SKIP_SETUP` flag for restarts
 - [ ] Disable unnecessary Plex processing on `.strm` items (analysis, thumbnail generation, etc.)
 - [ ] Follow 302 redirects from the source URL before returning to Plex — enables compatibility with services that require a redirect step (e.g. 115 Drive)
+
+---
+
+## Contributing
+
+Contributions are welcome! Whether it's a bug fix, a new feature, or an idea from the roadmap — feel free to open an issue or submit a pull request.
+
+If you'd like to get more involved and collaborate on the project long-term, reach out via GitHub. All skill levels are welcome.
+
+[github.com/liveinaus/plex-strm-assistant](https://github.com/liveinaus/plex-strm-assistant)
 
 ---
 
