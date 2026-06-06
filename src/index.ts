@@ -14,7 +14,7 @@ import { readStrmUrl, walkStrm } from './strm';
 const program = new Command();
 
 program
-  .name('plex-strm-helper')
+  .name('plex-strm-assistant')
   .description('Replaces .strm file paths in the Plex database with the URLs they contain')
   .version('1.0.0')
   .option('-d, --db <path>', 'Path to Plex library database', DEFAULT_DB_PATH)
