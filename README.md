@@ -54,7 +54,7 @@ docker run -d \
   -v /path/to/your/strm:/strm:ro \
   -v /path/to/plex/config:/plex-config \
   -e STRM_PROXY_HOST=<hostname-or-ip-reachable-by-plex-clients> \
-  plex-strm-assistant
+  liveinaus/plex-strm-assistant
 ```
 
 **Docker Compose:**
@@ -62,7 +62,7 @@ docker run -d \
 ```yaml
 services:
   strm-proxy:
-    image: plex-strm-assistant
+    image: liveinaus/plex-strm-assistant
     container_name: strm-proxy
     ports:
       - '3000:3000'
@@ -102,7 +102,7 @@ docker run -d \
   -v /path/to/tv-strm:/strm/TV:ro \
   -v /path/to/plex/config:/plex-config \
   -e STRM_PROXY_HOST=<hostname-or-ip> \
-  plex-strm-assistant
+  liveinaus/plex-strm-assistant
 ```
 
 Mount the same directories into Plex under `/media/strm/Movies` and `/media/strm/TV` respectively so the paths align.
@@ -127,7 +127,7 @@ Mount the same directories into Plex under `/media/strm/Movies` and `/media/strm
 The proxy can be restarted at any time without stopping Plex by setting `SKIP_SETUP=true`:
 
 ```bash
-docker run ... -e SKIP_SETUP=true plex-strm-assistant
+docker run ... -e SKIP_SETUP=true liveinaus/plex-strm-assistant
 ```
 
 ---
