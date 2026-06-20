@@ -208,7 +208,7 @@ rm -f "${DB}-wal" "${DB}-shm"
 - [x] Docker container — installs triggers on start, then runs proxy
 - [x] Multi-platform image (amd64, arm64)
 - [x] Safe first-run handling — waits for Plex DB, `SKIP_SETUP` flag for restarts
-- [ ] Disable unnecessary Plex processing on `.strm` items (analysis, thumbnail generation, etc.)
+- [x] Disable unnecessary Plex processing on `.strm` items (analysis, thumbnail generation, etc.)
 - [ ] Follow 302 redirects from the source URL before returning to Plex — enables compatibility with services that require a redirect step (e.g. 115 Drive)
 
 ---

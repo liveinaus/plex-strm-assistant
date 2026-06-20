@@ -58,7 +58,8 @@ const streamInfoSql = `
   INSERT INTO media_streams
     (stream_type_id, media_item_id, media_part_id, codec, channels, "index", created_at, updated_at)
   VALUES (2, NEW.media_item_id, NEW.id, 'aac', 2, 1, strftime('%s','now'), strftime('%s','now'));
-  UPDATE media_items SET video_codec = 'h264', audio_codec = 'aac', container = 'mp4'
+  UPDATE media_items SET video_codec = 'h264', audio_codec = 'aac', container = 'mp4',
+    media_analysis_version = 99
   WHERE id = NEW.media_item_id;`;
 
 const insertTriggerSql = `
@@ -135,7 +136,8 @@ const seedAudioSql = `
       WHERE ms.media_part_id = mp.id AND ms.stream_type_id = 2)`;
 
 const seedMediaItemsSql = `
-  UPDATE media_items SET video_codec = 'h264', audio_codec = 'aac', container = 'mp4'
+  UPDATE media_items SET video_codec = 'h264', audio_codec = 'aac', container = 'mp4',
+    media_analysis_version = 99
   WHERE id IN (
     SELECT DISTINCT media_item_id FROM media_parts
     WHERE file LIKE '${opts.proxyBase.replace(/\/$/, '')}%' AND deleted_at IS NULL)`;
