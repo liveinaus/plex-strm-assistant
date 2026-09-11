@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 /**
- * Gateway mode: a reverse proxy that sits in front of Plex Media Server so
- * direct-play traffic for .strm items goes straight from the source (e.g. a
- * 115 CDN) to the client, instead of source -> PMS -> client.
+ * Gateway: a reverse proxy in front of Plex Media Server. Clients connect here
+ * instead of PMS; everything passes through untouched except .strm items, which
+ * are handled per GATEWAY_MODE:
  *
- * Clients connect to this gateway instead of PMS. Every request is passed
- * through to PMS untouched, except direct-play media part requests
- * (/library/parts/{id}/{ts}/file.ext) whose part resolves to a .strm file:
- * those are answered with a 302 to the final source URL, which Plex clients
- * follow. Transcoded playback is unaffected and still flows through PMS.
+ *   direct-play (default): the client fetches the source directly -- the part
+ *     request is answered with a 302 to the source URL, and the transcode
+ *     decision is forced to Direct Play. Use when the source is reachable by
+ *     clients (e.g. a public CDN).
+ *
+ *   direct-stream: the source is relayed instead -- the decision is forced to
+ *     Direct Stream and the gateway streams the part bytes through itself. Use
+ *     when the source is only reachable in-cluster, so an off-network client
+ *     never has to reach it.
  *
  * The Plex database is opened read-only, so it is safe while Plex runs.
  */
@@ -16,7 +20,7 @@ import fs from 'fs';
 import http from 'http';
 import net from 'net';
 import path from 'path';
-import type { Duplex } from 'node:stream';
+import { Readable, type Duplex } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import { normaliseStrmUrl, resolveRedirects, strmPathFromUrlPath } from './strm';
 
@@ -24,6 +28,7 @@ const STRM_ROOT = path.resolve(process.env.STRM_ROOT ?? '/strm');
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 32500);
 const PLEX_UPSTREAM = new URL(process.env.PLEX_UPSTREAM ?? 'http://plex:32400');
 const FOLLOW_REDIRECTS = process.env.FOLLOW_REDIRECTS === 'true';
+const DIRECT_STREAM = process.env.GATEWAY_MODE === 'direct-stream';
 const DB_PATH =
   process.env.DB_PATH ??
   '/plex-config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db';
@@ -32,7 +37,7 @@ const DB_PATH =
 const PART_PATH_RE = /^\/library\/parts\/(\d+)\/\d+\/file(?:\.\w+)?$/;
 
 // Transcode decision endpoint: clients ask PMS how to play an item. For .strm
-// items the query is rewritten to force direct play before reaching PMS.
+// items the query is rewritten (direct play or direct stream) before reaching PMS.
 const DECISION_PATH = '/video/:/transcode/universal/decision';
 
 let db: DatabaseSync | null = null;
@@ -128,11 +133,11 @@ function metadataHasStrmPart(metadataId: string): boolean {
 }
 
 /**
- * Rewrites a transcode decision URL to force direct play when the item being
- * decided is a .strm. Returns the rewritten path+query, or null to pass the
- * request through untouched.
+ * Rewrites a transcode decision URL for a .strm item -- to Direct Play, or to
+ * Direct Stream in direct-stream mode. Returns the rewritten path+query, or null
+ * to pass the request through untouched.
  */
-function forceDirectPlayDecision(rawUrl: string, headerProduct?: string): string | null {
+function rewriteStrmDecision(rawUrl: string, headerProduct?: string): string | null {
   let url: URL;
   try {
     url = new URL(rawUrl, 'http://gateway');
@@ -147,8 +152,13 @@ function forceDirectPlayDecision(rawUrl: string, headerProduct?: string): string
   const metadataMatch = (url.searchParams.get('path') ?? '').match(/^\/library\/metadata\/(\d+)$/);
   if (!metadataMatch || !metadataHasStrmPart(metadataMatch[1])) return null;
 
-  url.searchParams.set('directPlay', '1');
-  // Client quality caps would otherwise veto direct play
+  if (DIRECT_STREAM) {
+    url.searchParams.set('directPlay', '0');
+    url.searchParams.set('directStream', '1');
+  } else {
+    url.searchParams.set('directPlay', '1');
+  }
+  // Client quality caps would otherwise veto direct play / force a transcode
   url.searchParams.delete('videoBitrate');
   url.searchParams.delete('maxVideoBitrate');
   // Burned-in subtitles force a transcode; let Plex deliver them separately
@@ -182,6 +192,72 @@ async function directUrlForPart(
   if (!url) return null;
 
   return FOLLOW_REDIRECTS ? resolveRedirects(url, userAgent) : url;
+}
+
+const RELAY_HEADERS = [
+  'content-type',
+  'content-length',
+  'content-range',
+  'accept-ranges',
+  'last-modified',
+  'etag',
+  'cache-control',
+];
+
+async function relayPart(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  target: string,
+): Promise<void> {
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
+
+  // We relay the upstream content-length verbatim, and
+  // fetch would otherwise decompress the body while the length stayed compressed.
+  const headers: Record<string, string> = { 'accept-encoding': 'identity' };
+  const range = req.headers['range'];
+  if (typeof range === 'string') headers.range = range;
+  const ua = req.headers['user-agent'];
+  if (typeof ua === 'string') headers['user-agent'] = ua;
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers,
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (!controller.signal.aborted) {
+      console.error(`relay fetch failed for ${target}: ${(err as Error).message}`);
+      if (!res.headersSent) res.writeHead(502).end('Source unavailable');
+    }
+    return;
+  }
+
+  const out: Record<string, string> = {};
+  for (const h of RELAY_HEADERS) {
+    const v = upstream.headers.get(h);
+    if (v) out[h] = v;
+  }
+  res.writeHead(upstream.status, out);
+
+  if (req.method === 'HEAD' || !upstream.body) {
+    res.end();
+    return;
+  }
+  const body = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]);
+  body.on('error', () => res.destroy());
+  body.pipe(res);
+}
+
+function isBrowserRequest(req: http.IncomingMessage): boolean {
+  return !!(
+    req.headers['sec-fetch-mode'] ||
+    req.headers['sec-fetch-dest'] ||
+    req.headers['origin']
+  );
 }
 
 /** Streams a request through to PMS, optionally with a rewritten path+query. */
@@ -222,8 +298,14 @@ const server = http.createServer(async (req, res) => {
       if (!VALIDATE_TOKEN || (await isValidToken(tokenFromRequest(req)))) {
         const target = await directUrlForPart(partMatch[1], req.headers['user-agent']);
         if (target) {
-          console.log(`302  part ${partMatch[1]}  ->  ${target}`);
-          res.writeHead(302, { Location: target }).end();
+          // Browsers can't follow a cross-origin 302 (CORS).
+          if (DIRECT_STREAM || isBrowserRequest(req)) {
+            console.log(`relay  part ${partMatch[1]}  ->  ${target}`);
+            await relayPart(req, res, target);
+          } else {
+            console.log(`302  part ${partMatch[1]}  ->  ${target}`);
+            res.writeHead(302, { Location: target }).end();
+          }
           return;
         }
       } else {
@@ -233,12 +315,14 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && urlPath === DECISION_PATH) {
       const productHeader = req.headers['x-plex-product'];
-      const rewritten = forceDirectPlayDecision(
+      const rewritten = rewriteStrmDecision(
         req.url ?? '/',
         Array.isArray(productHeader) ? productHeader[0] : productHeader,
       );
       if (rewritten) {
-        console.log(`MDE  forcing direct play  ${rewritten.slice(0, 120)}`);
+        console.log(
+          `MDE  forcing ${DIRECT_STREAM ? 'direct stream' : 'direct play'}  ${rewritten.slice(0, 120)}`,
+        );
         proxyThrough(req, res, rewritten);
         return;
       }
@@ -274,7 +358,7 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(GATEWAY_PORT, () =>
   console.log(
-    `strm-gateway on :${GATEWAY_PORT}  ->  ${PLEX_UPSTREAM.href}` +
+    `strm-gateway on :${GATEWAY_PORT}  ->  ${PLEX_UPSTREAM.href}  [${DIRECT_STREAM ? 'direct-stream' : 'direct-play'}]` +
       (FOLLOW_REDIRECTS ? '  (following upstream redirects)' : ''),
   ),
 );
