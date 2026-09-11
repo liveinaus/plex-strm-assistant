@@ -115,7 +115,7 @@ function metadataHasStrmPart(metadataId: string): boolean {
       .prepare(
         `SELECT mp.file FROM media_parts mp
          JOIN media_items mi ON mp.media_item_id = mi.id
-         WHERE mi.metadata_item_id = ?`,
+         WHERE mi.metadata_item_id = ? AND mp.deleted_at IS NULL`,
       )
       .all(metadataId) as { file: string }[];
     return rows.some((row) => row.file != null && strmPathForStored(row.file) !== null);
