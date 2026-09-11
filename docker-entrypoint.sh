@@ -30,7 +30,7 @@ else
   fi
 
   echo "[strm-proxy] Installing triggers (db=$DB, proxy=$PROXY_BASE)..."
-  node --experimental-sqlite /app/dist/setup.js \
+  node /app/dist/setup.js \
     --db "$DB" \
     --container-prefix "$CONTAINER_PREFIX" \
     --proxy-base "$PROXY_BASE"
@@ -40,7 +40,7 @@ fi
 # requests straight to the source, so streaming bypasses PMS entirely
 if [ "${GATEWAY_ENABLED:-false}" = "true" ]; then
   echo "[strm-proxy] Starting gateway..."
-  node --experimental-sqlite /app/dist/gateway.js &
+  node /app/dist/gateway.js &
 fi
 
 echo "[strm-proxy] Starting proxy..."

@@ -1,5 +1,5 @@
 # Stage 1: build TypeScript
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # Stage 2: runtime image
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 
 # Production deps only (just 'commander' -- no native sqlite3, Node built-in is used)
