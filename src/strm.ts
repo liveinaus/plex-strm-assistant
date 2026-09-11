@@ -16,9 +16,10 @@ export function normaliseStrmUrl(raw: string): string | null {
 }
 
 /** Reads a .strm file and returns the URL it contains, or null if unreadable/invalid. */
-export function readStrmUrl(filePath: string): string | null {
+export async function readStrmUrl(filePath: string): Promise<string | null> {
   try {
-    return normaliseStrmUrl(fs.readFileSync(filePath, 'utf-8').trim());
+    const contents = await fs.promises.readFile(filePath, 'utf-8');
+    return normaliseStrmUrl(contents.trim());
   } catch {
     return null;
   }

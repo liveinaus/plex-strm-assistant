@@ -23,7 +23,7 @@ const server = http.createServer(async (req, res) => {
 
     // readStrmUrl normalises the URL -- raw spaces or non-ASCII characters
     // in the Location header are rejected by Node and by upstream servers
-    let url = readStrmUrl(filePath);
+    let url = await readStrmUrl(filePath);
     if (!url) {
       res.writeHead(422).end('Not a valid HTTP URL');
       return;

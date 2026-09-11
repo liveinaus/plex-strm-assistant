@@ -25,7 +25,7 @@ import tls from 'tls';
 import path from 'path';
 import { Readable, type Duplex } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
-import { normaliseStrmUrl, resolveRedirects, strmPathFromUrlPath } from './strm';
+import { readStrmUrl, resolveRedirects, strmPathFromUrlPath } from './strm';
 
 const STRM_ROOT = path.resolve(process.env.STRM_ROOT ?? '/strm');
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 32500);
@@ -229,12 +229,7 @@ async function directUrlForPart(
   const strmPath = strmPathForStored(stored);
   if (!strmPath) return null;
 
-  let url: string | null;
-  try {
-    url = normaliseStrmUrl(fs.readFileSync(strmPath, 'utf-8').trim());
-  } catch {
-    return null;
-  }
+  const url = await readStrmUrl(strmPath);
   if (!url) return null;
 
   return FOLLOW_REDIRECTS ? resolveRedirects(url, userAgent) : url;
