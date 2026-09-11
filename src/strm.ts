@@ -77,7 +77,12 @@ export async function resolveRedirects(
     if (response.status < 300 || response.status >= 400) return current;
     const location = response.headers.get('location');
     if (!location) return current;
-    current = new URL(location, current).href;
+    try {
+      current = new URL(location, current).href;
+    } catch {
+      console.warn(`invalid redirect location "${location}" from ${current}`);
+      return current;
+    }
   }
   console.warn(`redirect limit (${MAX_REDIRECTS}) reached, using ${current}`);
   return current;
