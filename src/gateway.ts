@@ -190,8 +190,10 @@ function proxyThrough(
   urlOverride?: string,
 ): void {
   const upstreamReq = http.request(
-    new URL(urlOverride ?? req.url ?? '/', PLEX_UPSTREAM),
     {
+      hostname: PLEX_UPSTREAM.hostname,
+      port: PLEX_UPSTREAM.port,
+      path: urlOverride ?? req.url ?? '/',
       method: req.method,
       headers: { ...req.headers, host: PLEX_UPSTREAM.host },
     },
