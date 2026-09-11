@@ -157,9 +157,46 @@ All variables are optional. The defaults match the Quick start layout, so you on
 | `SKIP_SETUP`             | `false`                                                                                                               | Set to `true` to skip trigger installation (safe while Plex is running)                                                                                                           |
 | `FOLLOW_REDIRECTS`       | `false`                                                                                                               | Set to `true` to resolve the source URL's redirect chain server-side and return the final URL to Plex. Needed for services where the `.strm` URL is a redirector (e.g. 115 Drive) |
 | `GATEWAY_ENABLED`        | `false`                                                                                                               | Set to `true` to start the direct streaming gateway alongside the proxy                                                                                                           |
+| `GATEWAY_MODE`           | `direct-play`                                                                                                         | `direct-play`: client fetches the source (302). `direct-stream`: gateway relays the source bytes for in-cluster/private sources (see [gateway](#direct-streaming-gateway-source---client-bypassing-plex)) |
 | `GATEWAY_PORT`           | `32500`                                                                                                               | Port the gateway listens on                                                                                                                                                       |
 | `PLEX_UPSTREAM`          | `http://plex:32400`                                                                                                   | Plex Media Server address the gateway forwards to                                                                                                                                 |
 | `GATEWAY_VALIDATE_TOKEN` | `true`                                                                                                                | Validate the `X-Plex-Token` against Plex before redirecting media part requests. Set to `false` only on LAN-only setups                                                           |
+| `GATEWAY_TLS`            | `false`                                                                                                               | Set to `true` to serve the gateway over HTTPS with Plex's own `plex.direct` certificate, read from the Plex config volume (see [Secure connections](#secure-connections-appplextv)) |
+| `ANALYZE_ON_PLAY`        | `false`                                                                                                               | Set to `true` to have the gateway ask Plex to analyse a `.strm` item the first time it's played, if Plex hasn't yet (see [Real Media Info](#real-media-info))                     |
+
+---
+
+## Real Media Info
+
+A `.strm` has no local file, so until Plex analyses one it shows the placeholder H.264/AAC that
+the setup triggers seed to force direct play. Plex can analyse `.strm` items like any other file,
+but on its own it leaves many of them unanalysed, even after they've been played.
+
+That placeholder is not only cosmetic. An official Plex client asks the server how to play an item
+before it starts, and for an unanalysed `.strm` the answer is _"App cannot direct play this item.
+Container is unavailable for analysis"_, then _"Neither direct play nor conversion is available"_:
+the play errors, and retrying keeps failing until the item has been analysed. Third-party clients
+and Plex Web are not affected -- they fetch the media part, which the gateway answers itself.
+
+Set `ANALYZE_ON_PLAY=true` and the gateway asks Plex to analyse such an item the first time it sees
+it played, in either gateway mode -- whether the client asks Plex how to play it first, or goes
+straight for the media part as some clients do. It takes Plex a few seconds to a minute, after
+which official clients can play the item and Plex has the real container, codecs, bitrate and every
+audio and subtitle track. The request goes out with the server's own token (`PlexOnlineToken` in
+`Preferences.xml`, which is your plex.tv account token), so it works whichever user is playing; like
+the TLS cert, the file is found relative to `DB_PATH`. Only a play request whose own token Plex
+accepts can trigger it, the same check media part requests go through.
+
+Two things to know before turning it on. The analysis runs alongside the first play, with Plex
+opening the source itself, so a provider that limits concurrent streams, as many IPTV services do,
+may refuse either the analysis or the playback; leave it off there. And that first viewing still
+plays with the placeholder streams: the real audio and subtitle tracks are there from the second
+viewing on, so an item only ever watched once never benefits from them.
+
+Once an item has been analysed the gateway stops forcing its play decision. Codecs are reported
+truthfully from then on, so Plex weighs them against what the client can decode, and a client that
+can't play the source gets a transcode instead of a file it can't play. The client's quality caps
+and burned-in subtitles are still removed.
 
 ---
 
@@ -221,12 +258,21 @@ Default:        source (e.g. 115 CDN) -> Plex server -> client
 Gateway mode:   source (e.g. 115 CDN) ---------------> client
 ```
 
-Gateway mode removes the Plex server from the media path, similar to what [MediaWarp](https://github.com/AkimioJR/MediaWarp) does for Emby and Jellyfin. The gateway is a reverse proxy that sits in front of Plex: clients connect to it instead of the Plex port. All requests (browsing, metadata, transcoding, websockets) pass through to Plex untouched. Only two request types for `.strm` items are intercepted:
+The gateway is a reverse proxy that sits in front of Plex: clients connect to it instead of the Plex port. All requests (browsing, metadata, transcoding, websockets) pass through to Plex untouched. Only two request types for `.strm` items are intercepted, and how they're handled depends on `GATEWAY_MODE`:
 
-- **Media part requests** (direct play): the gateway resolves the final source URL and answers with a `302` that the client follows, so video flows straight from the source once playback starts.
-- **Transcode decision requests**: when a client asks Plex how to play a `.strm` item, the gateway rewrites the request to force direct play before it reaches Plex: client quality caps are stripped and burned-in subtitles are switched to separate delivery. This coerces clients that would otherwise transcode into direct playing. Plex Web is exempt: browsers block cross-origin media fetches (CORS), so web clients fall back to Direct Stream through the Plex server instead.
+**`direct-play` (default)** — removes the Plex server from the media path (similar to what [MediaWarp](https://github.com/AkimioJR/MediaWarp) does for Emby/Jellyfin). Use when the source is reachable by your clients (e.g. a public CDN).
 
-The gateway reads the Plex database in read-only mode, so it is safe while Plex is running and needs no extra setup step.
+- **Media part requests**: the gateway resolves the final source URL and answers with a `302` the client follows, so video flows straight from the source.
+- **Transcode decision requests**: rewritten to force Direct Play (quality caps stripped, burned-in subtitles switched to separate delivery), coercing clients that would otherwise transcode into direct playing.
+
+**`direct-stream`** — the gateway **relays the source bytes itself** (Range-aware), so an off-network client never has to reach the source. Use when the source is only reachable in-cluster / on a private network (e.g. `http://…svc.cluster.local`, or the in-pod proxy).
+
+- **Media part requests**: the gateway streams the source through itself instead of 302-ing.
+- **Transcode decision requests**: rewritten to Direct Stream (`directPlay=0`, `directStream=1`) so Plex also relays via its own transcode session where clients use that path.
+
+In both modes the decision is only forced while Plex knows nothing but the placeholder streams for the item. Once Plex has analysed it (see [Real Media Info](#real-media-info)) the gateway still removes the client's quality caps and burned-in subtitles, but Plex chooses between direct play, direct stream and transcoding from the real codecs. Plex Web is exempt in both modes (browsers block cross-origin media fetches via CORS and already fall back to Direct Stream through Plex), and non-`.strm` items pass straight through. The gateway reads the Plex database read-only, so it is safe while Plex runs and needs no extra setup step.
+
+> **Which mode?** If your `.strm` URLs point at something your phone/TV can reach directly → `direct-play`. If they point at an in-cluster/private source only the server can reach (the classic "works on web, fails in the app with connection refused" case) → `direct-stream`. Clients must be pointed at the gateway either way, or nothing is intercepted.
 
 ### 1. Enable the gateway
 
@@ -238,32 +284,37 @@ services:
     image: liveinaus/plex-strm-assistant
     container_name: strm-proxy
     environment:
-      - SKIP_SETUP=${SKIP_SETUP:-false}
+      # The triggers were installed in the Quick start; the gateway only reads the Plex config
+      - SKIP_SETUP=true
       - GATEWAY_ENABLED=true
+      # direct-play (default) or direct-stream (relay in-cluster/private sources)
+      - GATEWAY_MODE=direct-play
       # Resolve redirector URLs (e.g. 115) per play request, bound to the client
       - FOLLOW_REDIRECTS=true
     volumes:
       - ./strm:/strm:ro
-      - ./plex-config:/plex-config
+      - ./plex-config:/plex-config:ro
     ports:
       - '3000:3000'
       - '32500:32500' # gateway: clients connect here instead of :32400
     restart: unless-stopped
 ```
 
+> **What the gateway reads from `plex-config`:** the Plex database (opened read-only) in every mode. With `GATEWAY_TLS=true`, also Plex's `plex.direct` certificate in `Cache/` and, from `Preferences.xml`, the machine identifier that unlocks it. With `ANALYZE_ON_PLAY=true`, also `PlexOnlineToken` from `Preferences.xml` — that is your plex.tv account token, and the gateway sends it only to your own Plex server, to request an analysis. Know that you are handing the container those files before you turn either on. Nothing in the volume is written, hence the read-only mount and `SKIP_SETUP=true`: the triggers were installed in the Quick start, and a later setup run (after an upgrade, say) needs the mount writable and Plex stopped for that one start. One consequence of the read-only mount: while Plex is stopped the gateway can't open the database either (SQLite needs the `-shm` file Plex creates) and logs `db lookup failed`; it recovers by itself once Plex is running, which is the only time it has anything to do.
+
 ### 2. Restart the proxy
 
-Plex can keep running; the triggers are already installed:
+Plex can keep running; setup is skipped and nothing writes to the config volume:
 
 ```bash
-SKIP_SETUP=true docker compose up -d strm-proxy
+docker compose up -d strm-proxy
 ```
 
 The logs should show both services:
 
 ```text
 strm-proxy | strm-proxy on :3000  root: /strm
-strm-proxy | strm-gateway on :32500  ->  http://plex:32400/  (following upstream redirects)
+strm-proxy | strm-gateway on http://:32500  ->  http://plex:32400/  [direct-play]  (following upstream redirects)
 ```
 
 ### 3. Point your clients at the gateway
@@ -274,6 +325,17 @@ Clients must reach Plex through port `32500` instead of `32400`:
 - **Plex apps (recommended):** in Plex, open **Settings > Network > Custom server access URLs** and add `http://<your-host>:32500`. Apps that discover the server through your Plex account will then connect via the gateway automatically.
 
 Use a hostname or IP that your clients can reach on your network, not `localhost`.
+
+### Secure connections (`app.plex.tv`)
+
+`app.plex.tv` is served over HTTPS and refuses an insecure server connection, so a plain-HTTP gateway triggers _"unable to connect securely."_ Set `GATEWAY_TLS=true` and the gateway serves the client side with Plex's own `plex.direct` certificate — read from the shared Plex config volume — so `app.plex.tv` validates it exactly as it would the real server. The cert is reloaded automatically when Plex renews it.
+
+`GATEWAY_TLS`:
+
+- `false` (default) — plain HTTP.
+- `true` — HTTPS with Plex's `plex.direct` cert. **The gateway exits on startup if the cert can't be loaded** (bad config mount, or Plex hasn't generated its cert yet).
+
+For HTTPS, route the address Plex advertises for secure connections — its `plex.direct` host on port `32400` — to the gateway (external `:32400` → gateway). The Plex config volume must be mounted into the proxy container (it already is, for DB access); the cert is found relative to `DB_PATH`.
 
 ### 4. Verify it works
 
@@ -290,12 +352,14 @@ strm-proxy | MDE  forcing direct play  /video/:/transcode/universal/decision?...
 strm-proxy | 302  part 1234  ->  https://cdnfhnfile.115cdn.net/...
 ```
 
+Once Plex has analysed the item (`ANALYZE_ON_PLAY=true`) the first line reads `MDE  analysed, Plex decides` instead.
+
 If you do not see a `302 part` line while the video plays, the client connected to Plex directly (check step 3) or Plex is transcoding instead of direct playing (check the playback quality settings on the client; the session dashboard in Plex shows Direct Play vs Transcode).
 
 ### Limitations
 
 - Only direct play bypasses Plex. Transcoded playback still flows through the Plex server, since Plex must read the stream to transcode it.
-- Forced direct play means the client receives the original file as-is. A client that genuinely cannot decode it (codec, HDR, container) will fail to play or fall back to transcoding on its own.
+- Until an item has been analysed, forced direct play means the client receives the original file as-is, and a client that genuinely cannot decode it (codec, HDR, container) will fail to play or fall back to transcoding on its own. Once analysed (`ANALYZE_ON_PLAY=true`), Plex makes that call itself.
 - The client fetches the media itself, so it needs internet access to the source/CDN.
 - Media part redirects require a valid `X-Plex-Token`, checked against your Plex server (cached for 5 minutes). Requests without one fall through to Plex, which rejects them as normal. Set `GATEWAY_VALIDATE_TOKEN=false` to skip the check on LAN-only setups.
 - The resolved source URL in the `302` is handed to the client unauthenticated (the CDN URL itself is the credential), so treat gateway logs as sensitive.
@@ -334,13 +398,20 @@ rm -f "${DB}-wal" "${DB}-shm"
 - [x] HTTP proxy that resolves `.strm` files to stream URLs via `302` redirect
 - [x] SQLite triggers to survive Plex rescans automatically
 - [x] Inject H.264/AAC codec metadata to force direct play (no transcoding)
+- [x] Real audio and subtitle track metadata in Plex: the gateway has Plex analyse a `.strm` item on first play (`ANALYZE_ON_PLAY=true`, see [Real Media Info](#real-media-info))
 - [x] Docker container that installs triggers on start, then runs the proxy
 - [x] Multi-platform image (amd64, arm64)
 - [x] Safe first-run handling: waits for the Plex DB, `SKIP_SETUP` flag for restarts
 - [ ] Disable unnecessary Plex processing on `.strm` items (analysis, thumbnail generation, etc.)
-- [ ] Probe source URLs (ffprobe) to publish real audio and subtitle track metadata to Plex
 - [x] Follow 302 redirects from the source URL before returning to Plex (`FOLLOW_REDIRECTS=true`), enabling compatibility with services that require a redirect step (e.g. 115 Drive)
 - [x] Direct streaming gateway (`GATEWAY_ENABLED=true`): direct-play traffic goes straight from the source to the client, bypassing the Plex server (MediaWarp-style)
+- [x] Gateway `direct-stream` mode (`GATEWAY_MODE=direct-stream`): relay the source bytes through the gateway for sources only reachable in-cluster / on a private network
+
+---
+
+## Running from source
+
+The Docker image ships Node 24, and the published CLI targets **Node 24 or newer** (`engines` in `package.json`). `node:sqlite` no longer needs the `--experimental-sqlite` flag (since Node 22.13 and 23.4), so the npm scripts run it directly. On runtimes older than that, `npm start` / `npm run dev` fail; upgrade Node rather than re-adding the flag.
 
 ---
 
