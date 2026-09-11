@@ -34,6 +34,7 @@ const UPSTREAM_IS_HTTPS = PLEX_UPSTREAM.protocol === 'https:';
 const UPSTREAM_PORT = Number(PLEX_UPSTREAM.port || (UPSTREAM_IS_HTTPS ? 443 : 80));
 const FOLLOW_REDIRECTS = process.env.FOLLOW_REDIRECTS === 'true';
 const DIRECT_STREAM = process.env.GATEWAY_MODE === 'direct-stream';
+const ANALYZE_ON_PLAY = process.env.ANALYZE_ON_PLAY === 'true';
 const DB_PATH =
   process.env.DB_PATH ??
   '/plex-config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db';
@@ -109,6 +110,10 @@ async function isValidToken(token: string | null): Promise<boolean> {
   }
 }
 
+async function isAuthorized(req: http.IncomingMessage): Promise<boolean> {
+  return !VALIDATE_TOKEN || isValidToken(tokenFromRequest(req));
+}
+
 /** Maps a stored proxy URL to its .strm file on disk, or null if it is not one. */
 function strmPathForStored(stored: string): string | null {
   if (!stored.startsWith('http')) return null;
@@ -121,31 +126,61 @@ function strmPathForStored(stored: string): string | null {
   return strmPathFromUrlPath(STRM_ROOT, urlPath);
 }
 
-/** True when any media part of the metadata item resolves to a .strm file. */
-function metadataHasStrmPart(metadataId: string): boolean {
+type StrmState = 'not-strm' | 'unanalysed' | 'analysed';
+
+function strmState(metadataId: string): StrmState {
   try {
     db ??= new DatabaseSync(DB_PATH, { readOnly: true, timeout: 5000 });
     const rows = db
       .prepare(
-        `SELECT mp.file FROM media_parts mp
+        `SELECT mp.file, mp.duration FROM media_parts mp
          JOIN media_items mi ON mp.media_item_id = mi.id
          WHERE mi.metadata_item_id = ? AND mp.deleted_at IS NULL`,
       )
-      .all(metadataId) as { file: string }[];
-    return rows.some((row) => row.file != null && strmPathForStored(row.file) !== null);
+      .all(metadataId) as { file: string | null; duration: number | null }[];
+    const strmParts = rows.filter(
+      (row) => row.file != null && strmPathForStored(row.file) !== null,
+    );
+    if (strmParts.length === 0) return 'not-strm';
+    return strmParts.some((row) => !row.duration) ? 'unanalysed' : 'analysed';
   } catch (err) {
     console.warn(`db lookup failed: ${(err as Error).message}`);
     db = null;
-    return false;
+    return 'not-strm';
   }
 }
 
-/**
- * Rewrites a transcode decision URL for a .strm item -- to Direct Play, or to
- * Direct Stream in direct-stream mode. Returns the rewritten path+query, or null
- * to pass the request through untouched.
- */
-function rewriteStrmDecision(rawUrl: string, headerProduct?: string): string | null {
+function decisionMetadataId(rawUrl: string): string | undefined {
+  try {
+    const target = new URL(rawUrl, 'http://gateway').searchParams.get('path') ?? '';
+    return /^\/library\/metadata\/(\d+)$/.exec(target)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function metadataIdForPart(partId: string): string | undefined {
+  try {
+    db ??= new DatabaseSync(DB_PATH, { readOnly: true, timeout: 5000 });
+    const row = db
+      .prepare(
+        `SELECT mi.metadata_item_id AS id FROM media_parts mp
+         JOIN media_items mi ON mp.media_item_id = mi.id
+         WHERE mp.id = ?`,
+      )
+      .get(partId) as { id: number } | undefined;
+    return row ? String(row.id) : undefined;
+  } catch (err) {
+    console.warn(`db lookup failed: ${(err as Error).message}`);
+    db = null;
+    return undefined;
+  }
+}
+
+function rewriteStrmDecision(
+  rawUrl: string,
+  headerProduct?: string,
+): { url: string; forced: boolean } | null {
   let url: URL;
   try {
     url = new URL(rawUrl, 'http://gateway');
@@ -158,12 +193,15 @@ function rewriteStrmDecision(rawUrl: string, headerProduct?: string): string | n
   if (product === 'Plex Web') return null;
 
   const metadataMatch = (url.searchParams.get('path') ?? '').match(/^\/library\/metadata\/(\d+)$/);
-  if (!metadataMatch || !metadataHasStrmPart(metadataMatch[1])) return null;
+  if (!metadataMatch) return null;
+  const state = strmState(metadataMatch[1]);
+  if (state === 'not-strm') return null;
 
-  if (DIRECT_STREAM) {
+  const forced = state === 'unanalysed';
+  if (forced && DIRECT_STREAM) {
     url.searchParams.set('directPlay', '0');
     url.searchParams.set('directStream', '1');
-  } else {
+  } else if (forced) {
     url.searchParams.set('directPlay', '1');
   }
   // Client quality caps would otherwise veto direct play / force a transcode
@@ -173,7 +211,7 @@ function rewriteStrmDecision(rawUrl: string, headerProduct?: string): string | n
   if (url.searchParams.get('subtitles') === 'burn') {
     url.searchParams.set('subtitles', 'auto');
   }
-  return url.pathname + url.search;
+  return { url: url.pathname + url.search, forced };
 }
 
 /**
@@ -200,6 +238,37 @@ async function directUrlForPart(
   if (!url) return null;
 
   return FOLLOW_REDIRECTS ? resolveRedirects(url, userAgent) : url;
+}
+
+const analyzeRequested = new Set<string>();
+function analyzeOnPlay(metadataId: string): void {
+  if (analyzeRequested.has(metadataId) || strmState(metadataId) !== 'unanalysed') return;
+  analyzeRequested.add(metadataId);
+  let token: string | undefined;
+  try {
+    // The playing user's token may not be allowed to trigger analysis.
+    token = plexPreference('PlexOnlineToken');
+    if (!token) throw new Error('no PlexOnlineToken in it');
+  } catch (err) {
+    console.warn(`analyze-on-play: cannot use Preferences.xml: ${(err as Error).message}`);
+    return;
+  }
+  (UPSTREAM_IS_HTTPS ? https : http)
+    .request(
+      new URL(`/library/metadata/${metadataId}/analyze`, PLEX_UPSTREAM),
+      { method: 'PUT', headers: { 'X-Plex-Token': token } },
+      (res) => {
+        res.resume();
+        if ((res.statusCode ?? 0) >= 400) {
+          console.warn(
+            `analyze-on-play: PMS rejected metadata ${metadataId} (HTTP ${res.statusCode})`,
+          );
+        }
+      },
+    )
+    .on('error', (err) => console.warn(`analyze-on-play: cannot reach PMS: ${err.message}`))
+    .end();
+  console.log(`analyze  metadata ${metadataId}`);
 }
 
 const RELAY_HEADERS = [
@@ -303,9 +372,13 @@ function resolveCertPath(): string {
   return path.join(cacheDir, found);
 }
 
-function loadPlexTls(): { pfx: Buffer; passphrase: string } {
+function plexPreference(name: string): string | undefined {
   const prefs = fs.readFileSync(path.join(PLEX_CONFIG_DIR, 'Preferences.xml'), 'utf-8');
-  const id = /ProcessedMachineIdentifier="([^"]+)"/.exec(prefs)?.[1];
+  return new RegExp(`${name}="([^"]+)"`).exec(prefs)?.[1];
+}
+
+function loadPlexTls(): { pfx: Buffer; passphrase: string } {
+  const id = plexPreference('ProcessedMachineIdentifier');
   if (!id) throw new Error('ProcessedMachineIdentifier missing from Preferences.xml');
   const passphrase = crypto
     .createHash('sha512')
@@ -328,9 +401,13 @@ const handleRequest = async (
     if (partMatch) {
       // Validate before resolving: unauthenticated requests must not trigger
       // source URL resolution, and fall through to Plex's own auth (401)
-      if (!VALIDATE_TOKEN || (await isValidToken(tokenFromRequest(req)))) {
+      if (await isAuthorized(req)) {
         const target = await directUrlForPart(partMatch[1], req.headers['user-agent']);
         if (target) {
+          if (ANALYZE_ON_PLAY) {
+            const metadataId = metadataIdForPart(partMatch[1]);
+            if (metadataId) analyzeOnPlay(metadataId);
+          }
           // Browsers can't follow a cross-origin 302 (CORS).
           if (DIRECT_STREAM || isBrowserRequest(req)) {
             console.log(`relay  part ${partMatch[1]}  ->  ${target}`);
@@ -347,16 +424,19 @@ const handleRequest = async (
     }
 
     if (req.method === 'GET' && urlPath === DECISION_PATH) {
+      const metadataId = decisionMetadataId(req.url ?? '/');
+      if (metadataId && ANALYZE_ON_PLAY && (await isAuthorized(req))) analyzeOnPlay(metadataId);
       const productHeader = req.headers['x-plex-product'];
       const rewritten = rewriteStrmDecision(
         req.url ?? '/',
         Array.isArray(productHeader) ? productHeader[0] : productHeader,
       );
       if (rewritten) {
-        console.log(
-          `MDE  forcing ${DIRECT_STREAM ? 'direct stream' : 'direct play'}  ${rewritten.slice(0, 120)}`,
-        );
-        proxyThrough(req, res, rewritten);
+        const how = rewritten.forced
+          ? `forcing ${DIRECT_STREAM ? 'direct stream' : 'direct play'}`
+          : 'analysed, Plex decides';
+        console.log(`MDE  ${how}  ${rewritten.url.slice(0, 120)}`);
+        proxyThrough(req, res, rewritten.url);
         return;
       }
     }
@@ -424,7 +504,8 @@ const scheme = GATEWAY_TLS ? 'https' : 'http';
 server.listen(GATEWAY_PORT, () =>
   console.log(
     `strm-gateway on ${scheme}://:${GATEWAY_PORT}  ->  ${PLEX_UPSTREAM.href}  [${DIRECT_STREAM ? 'direct-stream' : 'direct-play'}]` +
-      (FOLLOW_REDIRECTS ? '  (following upstream redirects)' : ''),
+      (FOLLOW_REDIRECTS ? '  (following upstream redirects)' : '') +
+      (ANALYZE_ON_PLAY ? '  (analyze on play)' : ''),
   ),
 );
 
