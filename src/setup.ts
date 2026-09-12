@@ -57,6 +57,8 @@ const likePattern = `${opts.containerPrefix}/%.strm`;
 // embedded or sidecar subtitles) are left untouched, so anything Plex analysed
 // survives the rescans that re-fire this trigger. The media_items update runs
 // first so it only forces codecs while we are the ones supplying the data.
+// The audio stream's language must not be NULL: Plex reads it without a null check
+// when building a show's or season's preferences and 500s the whole details view.
 const streamInfoSql = `
   UPDATE media_items SET video_codec = 'h264', audio_codec = 'aac', container = 'mp4'
   WHERE id = NEW.media_item_id
@@ -70,8 +72,8 @@ const streamInfoSql = `
     SELECT 1 FROM media_streams
     WHERE media_part_id = NEW.id AND stream_type_id = 1);
   INSERT INTO media_streams
-    (stream_type_id, media_item_id, media_part_id, codec, channels, "index", created_at, updated_at)
-  SELECT 2, NEW.media_item_id, NEW.id, 'aac', 2, 1, strftime('%s','now'), strftime('%s','now')
+    (stream_type_id, media_item_id, media_part_id, codec, channels, language, "index", created_at, updated_at)
+  SELECT 2, NEW.media_item_id, NEW.id, 'aac', 2, '', 1, strftime('%s','now'), strftime('%s','now')
   WHERE NOT EXISTS (
     SELECT 1 FROM media_streams
     WHERE media_part_id = NEW.id AND stream_type_id = 2);`;
@@ -140,14 +142,23 @@ const seedStreamsSql = `
 
 const seedAudioSql = `
   INSERT OR IGNORE INTO media_streams
-    (stream_type_id, media_item_id, media_part_id, codec, channels, "index", created_at, updated_at)
-  SELECT 2, mp.media_item_id, mp.id, 'aac', 2, 1, strftime('%s','now'), strftime('%s','now')
+    (stream_type_id, media_item_id, media_part_id, codec, channels, language, "index", created_at, updated_at)
+  SELECT 2, mp.media_item_id, mp.id, 'aac', 2, '', 1, strftime('%s','now'), strftime('%s','now')
   FROM media_parts mp
   WHERE mp.file LIKE '${opts.proxyBase.replace(/\/$/, '')}%'
     AND mp.deleted_at IS NULL
     AND NOT EXISTS (
       SELECT 1 FROM media_streams ms
       WHERE ms.media_part_id = mp.id AND ms.stream_type_id = 2)`;
+
+const healAudioLanguageSql = `
+  UPDATE media_streams SET language = '', updated_at = strftime('%s','now')
+  WHERE stream_type_id = 2
+    AND language IS NULL
+    AND media_part_id IN (
+      SELECT mp.id FROM media_parts mp
+      WHERE mp.file LIKE '${opts.proxyBase.replace(/\/$/, '')}%'
+        AND mp.deleted_at IS NULL)`;
 
 // Only force codecs on items Plex has no video stream for, so real analysis results stand.
 const seedMediaItemsSql = `
@@ -166,6 +177,11 @@ db.exec(seedStreamsSql);
 db.exec(seedAudioSql);
 if (itemsUpdated.changes > 0) {
   console.log(`Seeded stream info (h264/aac) for ${itemsUpdated.changes} existing proxy item(s).`);
+}
+
+const healed = db.prepare(healAudioLanguageSql).run();
+if (healed.changes > 0) {
+  console.log(`Healed ${healed.changes} audio stream(s) left with a NULL language.`);
 }
 
 console.log('\nSetup complete. Plex rescans and new .strm files are now handled automatically.');

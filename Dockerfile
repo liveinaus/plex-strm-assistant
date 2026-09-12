@@ -1,5 +1,5 @@
 # Stage 1: build TypeScript
-FROM node:22-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # Stage 2: runtime image
-FROM node:22-alpine
+FROM node:26-alpine
 WORKDIR /app
 
 # Production deps only (just 'commander' -- no native sqlite3, Node built-in is used)
@@ -27,5 +27,7 @@ ENV STRM_ROOT=/strm
 ENV PORT=3000
 
 EXPOSE 3000
+# Gateway mode (GATEWAY_ENABLED=true): clients connect here instead of PMS
+EXPOSE 32500
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

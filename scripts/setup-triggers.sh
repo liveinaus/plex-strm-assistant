@@ -30,14 +30,14 @@ ARGS=(
 )
 
 if [[ " $* " == *" --dry-run "* ]]; then
-  node --experimental-sqlite "$ROOT/dist/setup.js" "${ARGS[@]}" --dry-run
+  node "$ROOT/dist/setup.js" "${ARGS[@]}" --dry-run
   exit 0
 fi
 
 echo "Stopping Plex..."
 docker compose -f "$ROOT/docker-compose.yml" stop plex
 
-node --experimental-sqlite "$ROOT/dist/setup.js" "${ARGS[@]}"
+node "$ROOT/dist/setup.js" "${ARGS[@]}"
 
 echo "Starting Plex..."
 docker compose -f "$ROOT/docker-compose.yml" start plex
