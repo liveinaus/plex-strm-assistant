@@ -1,6 +1,6 @@
 {
   "name": "plex-strm-assistant",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Replaces .strm file paths in the Plex database with the URLs they contain",
   "main": "dist/index.js",
   "bin": {
@@ -19,7 +19,7 @@
     "commander": "^12.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.19.19",
+    "@types/node": "^24.13.5",
     "prettier": "^3.3.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.2"

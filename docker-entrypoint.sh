@@ -52,12 +52,19 @@ node /app/dist/proxy.js &
 proxy_pid=$!
 
 stopping=""
-trap 'stopping=1; kill -TERM "$gateway_pid" "$proxy_pid" 2>/dev/null || true' TERM INT
+trap 'stopping=1' TERM INT
 
-# wait -n is busybox ash and bash, not POSIX sh.
-wait -n || true
+# Wait for either child to exit, or for a stop signal. Polled rather than
+# 'wait -n', which is a bashism busybox ash only gained recently: where it is
+# unsupported it returns instantly and the container restart-loops.
+while [ -z "$stopping" ] &&
+      kill -0 "$gateway_pid" 2>/dev/null &&
+      kill -0 "$proxy_pid" 2>/dev/null; do
+  sleep 1
+done
+
 [ -n "$stopping" ] || echo "[strm-proxy] a process exited -- stopping the container"
 kill -TERM "$gateway_pid" "$proxy_pid" 2>/dev/null || true
-wait || true
+wait 2>/dev/null || true
 [ -n "$stopping" ] || exit 1
 exit 0
