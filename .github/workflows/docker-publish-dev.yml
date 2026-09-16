@@ -1,0 +1,71 @@
+name: Publish dev Docker image
+
+on:
+  push:
+    tags:
+      - dev-*
+
+jobs:
+  build-and-push-dev:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble image tags
+        id: tags
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          REF: ${{ github.ref_name }}
+        run: |
+          GHCR_IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "tags<<EOF"
+            echo "$GHCR_IMAGE:$REF"
+            echo "$GHCR_IMAGE:dev"
+            if [ -n "$DH_USER" ]; then
+              echo "$DH_USER/plex-strm-assistant:$REF"
+              echo "$DH_USER/plex-strm-assistant:dev"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_ENABLED == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushes the exact tag (e.g. dev-0.8.3-1) plus a rolling 'dev' tag.
+      # Never touches 'latest'.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

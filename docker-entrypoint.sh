@@ -30,11 +30,34 @@ else
   fi
 
   echo "[strm-proxy] Installing triggers (db=$DB, proxy=$PROXY_BASE)..."
-  node --experimental-sqlite /app/dist/setup.js \
+  node /app/dist/setup.js \
     --db "$DB" \
     --container-prefix "$CONTAINER_PREFIX" \
     --proxy-base "$PROXY_BASE"
 fi
 
+if [ "${GATEWAY_ENABLED:-false}" != "true" ]; then
+  echo "[strm-proxy] Starting proxy..."
+  exec node /app/dist/proxy.js
+fi
+
+# Gateway mode: reverse proxy in front of PMS that 302s direct-play .strm
+# requests straight to the source, so streaming bypasses PMS entirely
+echo "[strm-proxy] Starting gateway..."
+node /app/dist/gateway.js &
+gateway_pid=$!
+
 echo "[strm-proxy] Starting proxy..."
-exec node /app/dist/proxy.js
+node /app/dist/proxy.js &
+proxy_pid=$!
+
+stopping=""
+trap 'stopping=1; kill -TERM "$gateway_pid" "$proxy_pid" 2>/dev/null || true' TERM INT
+
+# wait -n is busybox ash and bash, not POSIX sh.
+wait -n || true
+[ -n "$stopping" ] || echo "[strm-proxy] a process exited -- stopping the container"
+kill -TERM "$gateway_pid" "$proxy_pid" 2>/dev/null || true
+wait || true
+[ -n "$stopping" ] || exit 1
+exit 0

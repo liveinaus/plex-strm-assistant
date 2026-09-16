@@ -1,56 +1,55 @@
 #!/usr/bin/env node
-import fs from 'fs';
 import http from 'http';
 import path from 'path';
-import { normaliseStrmUrl } from './strm';
+import { readStrmUrl, resolveRedirects, strmPathFromUrlPath } from './strm';
 
 const STRM_ROOT = path.resolve(process.env.STRM_ROOT ?? '/strm');
 const PORT = Number(process.env.PORT ?? 3000);
+// Follow the source URL's redirect chain server-side and hand Plex the final
+// URL. Needed for services where the .strm URL is a redirector, e.g. 115 Drive.
+const FOLLOW_REDIRECTS = process.env.FOLLOW_REDIRECTS === 'true';
 
-http
-  .createServer((req, res) => {
-    // Strip query string and fragment, decode percent-encoding.
-    // Avoid new URL() -- it can reject literal spaces sent by some HTTP clients.
+const server = http.createServer(async (req, res) => {
+  try {
+    // Strip query string and fragment. Avoid new URL() -- it can reject
+    // literal spaces sent by some HTTP clients.
     const rawPath = (req.url ?? '/').split(/[?#]/)[0];
-    let decodedPath: string;
-    try {
-      decodedPath = decodeURIComponent(rawPath);
-    } catch {
-      decodedPath = rawPath;
-    }
 
-    let filePath = path.resolve(STRM_ROOT, '.' + decodedPath);
-
-    if (!filePath.startsWith(STRM_ROOT + path.sep) && filePath !== STRM_ROOT) {
-      res.writeHead(403).end('Forbidden');
-      return;
-    }
-
-    // Plex stores the proxy URL with a .mp4 extension (so it treats it as video).
-    // Map it back to the real .strm file on disk.
-    if (!fs.existsSync(filePath)) {
-      const strmPath = filePath.replace(/\.[^./]+$/, '.strm');
-      if (fs.existsSync(strmPath)) {
-        filePath = strmPath;
-      }
-    }
-
-    let raw: string;
-    try {
-      raw = fs.readFileSync(filePath, 'utf-8').trim();
-    } catch {
+    const filePath = strmPathFromUrlPath(STRM_ROOT, rawPath);
+    if (!filePath) {
       res.writeHead(404).end('Not found');
       return;
     }
 
-    // Normalise before redirecting -- raw spaces or non-ASCII characters in the
-    // Location header are rejected by Node and by upstream servers
-    const url = normaliseStrmUrl(raw);
+    // readStrmUrl normalises the URL -- raw spaces or non-ASCII characters
+    // in the Location header are rejected by Node and by upstream servers
+    let url = await readStrmUrl(filePath);
     if (!url) {
       res.writeHead(422).end('Not a valid HTTP URL');
       return;
     }
-    console.log(`302  ${decodedPath}  ->  ${url}`);
+
+    if (FOLLOW_REDIRECTS) {
+      url = await resolveRedirects(url, req.headers['user-agent']);
+    }
+
+    console.log(`302  ${rawPath}  ->  ${url}`);
     res.writeHead(302, { Location: url }).end();
-  })
-  .listen(PORT, () => console.log(`strm-proxy on :${PORT}  root: ${STRM_ROOT}`));
+  } catch (err) {
+    console.error(`error handling ${req.url}: ${(err as Error).message}`);
+    if (!res.headersSent) res.writeHead(500).end('Internal error');
+  }
+});
+
+server.listen(PORT, () =>
+  console.log(
+    `strm-proxy on :${PORT}  root: ${STRM_ROOT}` +
+      (FOLLOW_REDIRECTS ? '  (following upstream redirects)' : ''),
+  ),
+);
+
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(sig, () => {
+    server.close(() => process.exit(0));
+  });
+}
