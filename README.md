@@ -143,6 +143,36 @@ SKIP_SETUP=true docker compose up -d strm-proxy
 
 ---
 
+## Uninstalling
+
+Stopping the `strm-proxy` container is not enough. The setup step writes triggers into Plex's own library database, and they stay there after the container is gone: new `.strm` files are still rewritten to `http://strm-proxy:3000/....mp4` URLs and seeded with placeholder H.264/AAC stream info.
+
+To remove the service completely:
+
+1. Stop Plex (`docker compose stop plex`) and back up `com.plexapp.plugins.library.db`.
+2. Drop the triggers and restore the original `.strm` paths. Adjust `http://strm-proxy:3000` and `/media/strm` if you changed `STRM_PROXY_HOST`, the proxy port or the strm mount path.
+
+```bash
+DB="/path/to/plex/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+sqlite3 "$DB" <<'SQL'
+DROP TRIGGER IF EXISTS strm_auto_patch_insert;
+DROP TRIGGER IF EXISTS strm_auto_patch_update;
+DROP TRIGGER IF EXISTS strm_proxy_guard;
+
+UPDATE media_parts
+SET file = '/media/strm'
+  || substr(file, length('http://strm-proxy:3000') + 1,
+            length(file) - length('http://strm-proxy:3000') - 4)
+  || '.strm'
+WHERE file LIKE 'http://strm-proxy:3000/%.mp4';
+SQL
+```
+
+3. Remove the `strm-proxy` service from `docker-compose.yml` and start Plex again. If you used the gateway, point your clients back at the Plex port.
+4. Rescan the library. Items that still carry the placeholder streams keep them until Plex re-analyses them, so run **Analyze** or **Refresh Metadata** on those.
+
+---
+
 ## Configuration
 
 All variables are optional. The defaults match the Quick start layout, so you only need these if your mount paths or hostnames differ.
